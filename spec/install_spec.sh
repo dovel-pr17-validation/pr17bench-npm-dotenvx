@@ -1,0 +1,712 @@
+export CI=1 # because we are running this on github actions and makes testing output easier
+export TEST_MODE=1 # set to test mode in order to not run run() for test purposes
+
+Describe 'install.sh'
+  Include install.sh
+
+  setup() {
+    VERSION="1.0.0"
+    PRIMARY_DIRECTORY="/usr/local/bin"
+    DIRECTORY="./spec/tmp"
+    FALLBACK_DIRECTORY="$HOME/.local/bin"
+  }
+
+  # remove the dotenvx binary and dx alias before each test
+  cleanup() {
+    rm -f ./spec/tmp/dotenvx ./spec/tmp/dx
+    rm -f ./spec/tmp/archive.tar.gz ./spec/tmp/checksums.txt
+    rm -rf ./spec/tmp/install-directory
+  }
+
+  mock_home() {
+    HOME="/home/testuser"
+    DIRECTORY="~/testdir"
+  }
+
+  mock_unwritable_directory() {
+    DIRECTORY="/usr/local/testing-installer" # requires root/sudo
+  }
+
+  mock_which_curl_empty() {
+    echo ""
+
+    return 0
+  }
+
+  mock_which_dotenvx_empty() {
+    echo ""
+
+    return 0
+  }
+
+  mock_which_dotenvx_path_different() {
+    echo "/different/path"
+
+    return 0
+  }
+
+  preinstall_dotenvx() {
+    # Run the actual install_dotenvx function to install the binary
+    install_dotenvx > /dev/null
+  }
+
+  BeforeEach 'setup'
+  BeforeEach 'cleanup'
+  AfterEach 'cleanup'
+
+  Describe 'default values'
+    It 'checks default OS'
+      When call echo "$OS"
+      The output should equal ""
+    End
+
+    It 'checks default ARCH'
+      When call echo "$ARCH"
+      The output should equal ""
+    End
+
+    It 'checks default VERSION'
+      When call echo "$VERSION"
+      The output should equal "1.0.0"
+    End
+
+    It 'checks default DIRECTORY'
+      When call echo "$DIRECTORY"
+      The output should equal "./spec/tmp"
+    End
+
+    It 'checks default FORCE'
+      When call echo "$FORCE"
+      The output should equal ""
+    End
+  End
+
+  Describe 'is_piped()'
+    It 'returns false'
+      When call is_piped
+      The status should equal 1
+    End
+  End
+
+  Describe 'help_sudo_install_command'
+    It 'returns sudo in front of command'
+      When call help_sudo_install_command
+      The status should equal 0
+      The output should equal "sudo $0"
+    End
+
+    Describe 'when is_piped is true'
+      is_piped() {
+        return 0
+      }
+
+      It "returns with curl example"
+        When call help_sudo_install_command
+        The status should equal 0
+        The output should equal "curl -sfS https://dotenvx.sh | sudo $0"
+      End
+    End
+  End
+
+  Describe 'help_customize_directory_command'
+    It 'returns with --directory flag'
+      When call help_customize_directory_command
+      The status should equal 0
+      The output should equal "$0 --directory=."
+    End
+
+    Describe 'when is_piped is true'
+      is_piped() {
+        return 0
+      }
+
+      It "returns with curl example"
+        When call help_customize_directory_command
+        The status should equal 0
+        The output should equal "curl -sfS \"https://dotenvx.sh?directory=.\" | $0"
+      End
+    End
+  End
+
+  Describe 'is_ci()'
+    It 'returns true'
+      When call is_ci
+      The status should equal 0
+    End
+  End
+
+  Describe 'progress_bar()'
+    It 'returns --no-progress-meter (because is_ci is true)'
+      When call progress_bar
+      The status should equal 0
+      The output should equal "--no-progress-meter"
+    End
+
+    Describe 'when is_ci is true'
+      mock_is_ci_false() {
+        CI=0
+      }
+
+      Before 'mock_is_ci_false'
+
+      It 'returns --progress-bar'
+        When call progress_bar
+        The status should equal 0
+        The output should equal "--progress-bar"
+      End
+    End
+  End
+
+  Describe 'is_test_mode()'
+    It 'returns true'
+      When call is_test_mode
+      The status should equal 0
+    End
+
+    Describe 'typical case when TEST_MODE is false'
+      mock_is_test_mode_false() {
+        TEST_MODE=0
+      }
+
+      Before 'mock_is_test_mode_false'
+
+      It 'returns false'
+        When call is_test_mode
+        The status should equal 1
+      End
+    End
+  End
+
+  Describe 'usage()'
+    It 'displays usage'
+      When call usage
+      The output should equal "Usage: $0 [options] [command]
+
+install dotenvx – a secure dotenv
+
+Options:
+  --os              override operating system (e.g., linux, darwin)
+  --arch            override architecture (e.g., x64, arm64)
+  --directory       directory to install dotenvx to (default: \"/usr/local/bin\")
+  --force           force reinstallation even if already installed (default: false)
+  --version         version of dotenvx to install (default: \"1.0.0\")
+
+Commands:
+  install           install dotenvx
+  help              display help"
+    End
+  End
+
+  Describe 'directory()'
+    It 'smartly returns directory as default INSTALL_DIR'
+      When call directory
+      The output should equal "./spec/tmp"
+    End
+
+    Describe 'when home directory'
+      Before 'mock_home'
+
+      It 'expands ~ to home directory'
+        When call directory
+        The output should equal "/home/testuser/testdir"
+      End
+    End
+  End
+
+  Describe 'is_version_valid()'
+    It 'is true (0)'
+      When call is_version_valid
+      The status should equal 0
+    End
+
+    Describe 'when VERSION blank'
+      mock_version_blank() {
+        VERSION=""
+      }
+
+      Before mock_version_blank
+
+      It 'is false'
+        When call is_version_valid
+        The status should equal 1
+        The output should equal "[INSTALLATION_FAILED] VERSION () is blank in install.sh script
+? set VERSION to valid semantic semver version and try again"
+      End
+    End
+
+    Describe 'when VERSION invalid'
+      mock_version_invalid() {
+        VERSION="22"
+      }
+
+      Before mock_version_invalid
+
+      It 'is false'
+        When call is_version_valid
+        The status should equal 1
+        The output should equal "[INSTALLATION_FAILED] VERSION (22) is not a valid semantic version in install.sh script
+? set VERSION to valid semantic semver version and try again"
+      End
+    End
+  End
+
+  Describe 'is_directory_writable()'
+    It 'is true (0)'
+      When call is_directory_writable
+      The status should equal 0
+    End
+
+    Describe 'when unwritable directory'
+      Before 'mock_unwritable_directory'
+
+      It 'is false (1) to /usr/local/testing-installer (typical case that /usr/local/testing-installer is not writable)'
+        When call is_directory_writable
+        The status should equal 1
+        The output should equal "[INSTALLATION_FAILED] the installation directory [/usr/local/testing-installer] is not writable by the current user
+? run as root [sudo $0] or choose a writable directory like your current directory [$0 --directory=.]"
+      End
+    End
+  End
+
+  Describe 'select_install_directory()'
+    mock_default_directory() {
+      PRIMARY_DIRECTORY="/dotenvx-test-primary"
+      DIRECTORY="$PRIMARY_DIRECTORY"
+      FALLBACK_DIRECTORY="./spec/tmp"
+    }
+
+    Before 'mock_default_directory'
+
+    It 'falls back when /usr/local/bin is not writable'
+      When call select_install_directory
+      The status should equal 0
+      The output should equal ""
+      The variable DIRECTORY should equal "./spec/tmp"
+    End
+
+    Describe 'when /usr/local/bin is writable'
+      is_default_directory_writable() {
+        DIRECTORY="./spec/tmp"
+      }
+
+      Before 'is_default_directory_writable'
+
+      It 'keeps the preferred directory'
+        When call select_install_directory
+        The status should equal 0
+        The output should equal ""
+        The variable DIRECTORY should equal "./spec/tmp"
+      End
+    End
+
+    Describe 'when a custom directory is selected'
+      use_custom_directory() {
+        DIRECTORY="./spec/tmp"
+      }
+
+      Before 'use_custom_directory'
+
+      It 'preserves the requested directory'
+        When call select_install_directory
+        The status should equal 0
+        The output should equal ""
+        The variable DIRECTORY should equal "./spec/tmp"
+      End
+    End
+  End
+
+  Describe 'create_install_directory()'
+    use_new_install_directory() {
+      DIRECTORY="./spec/tmp/install-directory"
+    }
+
+    Before 'use_new_install_directory'
+
+    It 'creates the selected directory'
+      When call create_install_directory
+      The status should equal 0
+      The output should equal ""
+      The path ./spec/tmp/install-directory should be directory
+    End
+  End
+
+  Describe 'is_directory_in_path()'
+    use_fallback_directory() {
+      DIRECTORY="/dotenvx-test-bin"
+      FALLBACK_DIRECTORY="$DIRECTORY"
+    }
+
+    Before 'use_fallback_directory'
+
+    It 'returns true when the fallback directory is in PATH'
+      PATH="/usr/bin:/dotenvx-test-bin:/bin"
+      When call is_directory_in_path
+      The status should equal 0
+      The output should equal ""
+    End
+
+    It 'returns false with help when the fallback directory is not in PATH'
+      PATH="/usr/bin:/bin"
+      When call is_directory_in_path
+      The status should equal 1
+      The output should equal "[INSTALLATION_FAILED] the installation directory [/dotenvx-test-bin] is not in your PATH
+? add it to your PATH [export PATH=\"/dotenvx-test-bin:\$PATH\"] and try again"
+    End
+
+    Describe 'when a custom directory is not in PATH'
+      use_custom_directory() {
+        DIRECTORY="."
+      }
+
+      Before 'use_custom_directory'
+
+      It 'allows the custom directory'
+        PATH="/usr/bin:/bin"
+        When call is_directory_in_path
+        The status should equal 0
+        The output should equal ""
+      End
+    End
+  End
+
+  Describe 'is_curl_installed()'
+    It 'is true (0) (typical case that /usr/bin/curl is installed)'
+      When call is_curl_installed
+      The status should equal 0
+    End
+
+    Describe 'no curl'
+      which_curl() {
+        mock_which_curl_empty
+      }
+
+      It 'is false (1)'
+        When call is_curl_installed
+        The status should equal 1
+        The output should equal "[INSTALLATION_FAILED] curl is required and is not installed
+? install curl [$(help_install_curl_command)] and try again"
+      End
+    End
+  End
+
+  Describe 'os()'
+    It 'returns current os lowercased'
+      When call os
+      The status should equal 0
+      The output should equal "$(uname -s | tr '[:upper:]' '[:lower:]')"
+    End
+  End
+
+  Describe 'arch()'
+    It 'returns current arch lowercased'
+      When call arch
+      The status should equal 0
+      The output should equal "$(uname -m | tr '[:upper:]' '[:lower:]')"
+    End
+  End
+
+  Describe 'is_os_supported()'
+    It 'returns true'
+      When call is_os_supported
+      The status should equal 0
+    End
+  End
+
+  Describe 'is_arch_supported()'
+    It 'returns true'
+      When call is_arch_supported
+      The status should equal 0
+    End
+  End
+
+  Describe 'os_arch()'
+    It 'returns the combined values'
+      When call os_arch
+      The status should equal 0
+      The output should equal "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | tr '[:upper:]' '[:lower:]')"
+    End
+  End
+
+  Describe 'filename()'
+    It 'returns the combined values'
+      When call filename
+      The status should equal 0
+      The output should equal "dotenvx-1.0.0-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | tr '[:upper:]' '[:lower:]').tar.gz"
+    End
+  End
+
+  Describe 'download_url()'
+    It 'returns the combined values'
+      When call download_url
+      The status should equal 0
+      The output should equal "https://github.com/dotenvx/dotenvx/releases/download/v1.0.0/dotenvx-1.0.0-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | tr '[:upper:]' '[:lower:]').tar.gz"
+    End
+  End
+
+  Describe 'checksums_url()'
+    It 'returns the release checksum URL'
+      When call checksums_url
+      The status should equal 0
+      The output should equal "https://github.com/dotenvx/dotenvx/releases/download/v1.0.0/checksums.txt"
+    End
+  End
+
+  Describe 'verify_checksum()'
+    create_matching_checksum() {
+      echo "dotenvx" > ./spec/tmp/archive.tar.gz
+      checksum=$(sha256_of_file ./spec/tmp/archive.tar.gz)
+      echo "$checksum  $(filename)" > ./spec/tmp/checksums.txt
+    }
+
+    Before 'create_matching_checksum'
+
+    It 'accepts a matching checksum'
+      When call verify_checksum ./spec/tmp/archive.tar.gz ./spec/tmp/checksums.txt
+      The status should equal 0
+      The output should equal ""
+    End
+
+    Describe 'when the checksum does not match'
+      replace_with_bad_checksum() {
+        echo "0000000000000000000000000000000000000000000000000000000000000000  $(filename)" > ./spec/tmp/checksums.txt
+      }
+
+      Before 'replace_with_bad_checksum'
+
+      It 'rejects the archive'
+        When call verify_checksum ./spec/tmp/archive.tar.gz ./spec/tmp/checksums.txt
+        The status should equal 1
+        The output should include "[INSTALLATION_FAILED] checksum mismatch for [$(filename)]"
+      End
+    End
+  End
+
+  Describe 'checksum_fingerprint()'
+    create_checksum_manifest() {
+      echo "dotenvx" > ./spec/tmp/archive.tar.gz
+      checksum=$(sha256_of_file ./spec/tmp/archive.tar.gz)
+      echo "$checksum  $(filename)" > ./spec/tmp/checksums.txt
+    }
+
+    Before 'create_checksum_manifest'
+
+    It 'returns the first seven checksum characters'
+      When call checksum_fingerprint ./spec/tmp/checksums.txt
+      The status should equal 0
+      The output should equal "$(sha256_of_file ./spec/tmp/archive.tar.gz | cut -c1-7)"
+    End
+  End
+
+  Describe 'is_windows()'
+    It 'returns false'
+      When call is_windows
+      The status should equal 1
+    End
+
+    Describe 'when on windows os'
+      os() {
+        echo "windows"
+
+        return 0
+      }
+
+      It 'returns true'
+        When call is_windows
+        The status should equal 0
+      End
+    End
+  End
+
+  Describe 'alias_name()'
+    It 'returns dx'
+      When call alias_name
+      The status should equal 0
+      The output should equal "dx"
+    End
+
+    Describe 'when on windows os'
+      os() {
+        echo "windows"
+
+        return 0
+      }
+
+      It 'returns dx.exe'
+        When call alias_name
+        The status should equal 0
+        The output should equal "dx.exe"
+      End
+    End
+  End
+
+  Describe 'is_installed()'
+    which_dotenvx() {
+      mock_which_dotenvx_empty
+    }
+
+    It 'returns false'
+      When call is_installed
+      The status should equal 1
+    End
+
+    Describe 'when already installed'
+      BeforeEach 'preinstall_dotenvx'
+
+      It 'returns true and outputs a message'
+        When call is_installed
+        The status should equal 0
+        The output should equal "◈ already installed (1.0.0:./spec/tmp/dotenvx)
+⮕ next run [dotenvx encrypt]"
+      End
+    End
+  End
+
+  Describe 'which_dotenvx()'
+    which_dotenvx() {
+      mock_which_dotenvx_empty
+    }
+
+    It 'returns empty space'
+      When call which_dotenvx
+      The output should equal ""
+    End
+
+    Describe 'when a different path'
+      which_dotenvx() {
+        mock_which_dotenvx_path_different
+      }
+
+      It 'returns the different path'
+        When call which_dotenvx
+        The output should equal "/different/path"
+      End
+    End
+  End
+
+  Describe 'warn_of_any_conflict()'
+    which_dotenvx() {
+      mock_which_dotenvx_empty
+    }
+
+    It 'does not warn since which dotenvx is empty'
+      When call warn_of_any_conflict
+      The status should equal 0
+      The stderr should equal ""
+      The output should equal ""
+    End
+
+    Describe 'when a different dotenvx path'
+      which_dotenvx() {
+        mock_which_dotenvx_path_different
+      }
+
+      It 'warns'
+        When call warn_of_any_conflict
+        The status should equal 0
+        The stderr should equal "[DOTENVX_CONFLICT] conflicting dotenvx found at /different/path
+? we recommend updating your path to include ./spec/tmp"
+      End
+    End
+  End
+
+  Describe 'link_dx_alias()'
+    It 'creates dx symlink'
+      When call link_dx_alias
+      The status should equal 0
+      The path ./spec/tmp/dx should be symlink
+      Assert [ "$(readlink ./spec/tmp/dx)" = "dotenvx" ]
+    End
+
+    Describe 'when dx already exists'
+      create_existing_dx() {
+        echo "other" > ./spec/tmp/dx
+      }
+
+      Before 'create_existing_dx'
+
+      It 'does not overwrite existing dx'
+        When call link_dx_alias
+        The status should equal 0
+        The path ./spec/tmp/dx should be file
+        Assert [ "$(cat ./spec/tmp/dx)" = "other" ]
+      End
+    End
+  End
+
+  Describe 'install_dotenvx()'
+    which_dotenvx() {
+      mock_which_dotenvx_empty
+    }
+
+    It 'installs it'
+      When call install_dotenvx
+      The status should equal 0
+      The output should include "▣ verified (sha256:"
+      The output should include "◈ installed (1.0.0:./spec/tmp/dotenvx)"
+      The output should include "⮕ next run [dotenvx encrypt]"
+      The path ./spec/tmp/dx should be symlink
+      Assert [ "$(readlink ./spec/tmp/dx)" = "dotenvx" ]
+    End
+
+    Describe 'when a different path'
+      which_dotenvx() {
+        mock_which_dotenvx_path_different
+      }
+
+      It 'installs it but warns'
+        When call install_dotenvx
+        The status should equal 0
+        The output should include "▣ verified (sha256:"
+        The output should include "◈ installed (1.0.0:./spec/tmp/dotenvx)"
+        The output should include "⮕ next run [dotenvx encrypt]"
+        The stderr should equal "[DOTENVX_CONFLICT] conflicting dotenvx found at /different/path
+? we recommend updating your path to include ./spec/tmp"
+      End
+    End
+  End
+
+  Describe 'run()'
+    which_dotenvx() {
+      mock_which_dotenvx_empty
+    }
+
+    It 'installs dotenvx'
+      When call run
+      The status should equal 0
+      The output should include "▣ verified (sha256:"
+      The output should include "◈ installed (1.0.0:./spec/tmp/dotenvx)"
+      The output should include "⮕ next run [dotenvx encrypt]"
+      The path ./spec/tmp/dx should be symlink
+      Assert [ "$(readlink ./spec/tmp/dx)" = "dotenvx" ]
+    End
+
+    Describe 'when a different path'
+      which_dotenvx() {
+        mock_which_dotenvx_path_different
+      }
+
+      It 'installs it but warns'
+        When call run
+        The status should equal 0
+        The output should include "▣ verified (sha256:"
+        The output should include "◈ installed (1.0.0:./spec/tmp/dotenvx)"
+        The output should include "⮕ next run [dotenvx encrypt]"
+        The stderr should equal "[DOTENVX_CONFLICT] conflicting dotenvx found at /different/path
+? we recommend updating your path to include ./spec/tmp"
+      End
+    End
+
+    Describe 'when already installed at same location'
+      BeforeEach 'preinstall_dotenvx'
+
+      It 'says already installed'
+        When call run
+        The status should equal 0
+        The output should equal "◈ already installed (1.0.0:./spec/tmp/dotenvx)
+⮕ next run [dotenvx encrypt]"
+        The path ./spec/tmp/dx should be symlink
+        Assert [ "$(readlink ./spec/tmp/dx)" = "dotenvx" ]
+      End
+    End
+  End
+End

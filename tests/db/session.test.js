@@ -1,0 +1,383 @@
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+const t = require('tap')
+const proxyquire = require('proxyquire')
+const sinon = require('sinon')
+const tooling = require('@dotenvx/tooling')
+const nativeProvider = require('../../src/lib/providers/native')
+
+t.beforeEach(() => {
+  process.env.DOTENVX_CONFIG = fs.mkdtempSync(path.join(os.tmpdir(), 'dotenvx-session-'))
+  sinon.stub(nativeProvider, 'get').returns(null)
+  sinon.stub(nativeProvider, 'set').throws(new Error('native secret store unavailable'))
+  sinon.stub(nativeProvider, 'delete').throws(new Error('native secret store unavailable'))
+})
+
+t.afterEach(() => {
+  sinon.restore()
+  delete process.env.DOTENVX_CONFIG
+  delete process.env.DOTENVX_NO_ARMOR
+})
+
+t.test('Session stores login settings in dotenvx config', async ct => {
+  const Session = require('../../src/db/session')
+  const sesh = new Session()
+
+  ct.equal(sesh.hostname(), 'https://armor.dotenvx.com')
+  ct.equal(sesh.username(), undefined)
+  ct.equal(sesh.token(), undefined)
+  ct.equal(sesh.login('https://armor.example.com', 'user-id', 'scott', 'token-123'), 'token-123')
+  ct.equal(sesh.hostname(), 'https://armor.example.com')
+  ct.equal(sesh.username(), 'scott')
+  ct.equal(sesh.token(), 'token-123')
+  ct.equal(sesh.status(), 'on')
+  ct.equal(sesh.on(), true)
+  ct.equal(sesh.off(), false)
+  ct.type(sesh.path(), 'string')
+  const config = fs.readFileSync(path.join(process.env.DOTENVX_CONFIG, '.env'), 'utf8')
+  ct.match(config, /DOTENVX_ARMOR_TOKEN="token-123"/)
+  ct.match(config, /DOTENVX_ARMOR_ON="true"/)
+})
+
+t.test('Session turns armor off and on in settings', ct => {
+  const Session = require('../../src/db/session')
+  const sesh = new Session()
+
+  sesh.login('https://armor.example.com', 'user-id', 'scott', 'token-123')
+
+  ct.equal(sesh.turnOff(), 'false')
+  ct.equal(sesh.on(), false)
+  ct.equal(sesh.off(), true)
+  ct.equal(sesh.status(), 'off')
+  ct.match(fs.readFileSync(path.join(process.env.DOTENVX_CONFIG, '.env'), 'utf8'), /DOTENVX_ARMOR_ON="false"/)
+
+  ct.equal(sesh.turnOn(), 'true')
+  ct.equal(sesh.on(), true)
+  ct.equal(sesh.off(), false)
+  ct.equal(sesh.status(), 'on')
+  ct.match(fs.readFileSync(path.join(process.env.DOTENVX_CONFIG, '.env'), 'utf8'), /DOTENVX_ARMOR_ON="true"/)
+  ct.end()
+})
+
+t.test('Session stores login token in native secret store first', ct => {
+  nativeProvider.get.returns('token-123')
+  nativeProvider.set.resetBehavior()
+
+  const Session = require('../../src/db/session')
+  const sesh = new Session()
+
+  ct.equal(sesh.login('https://armor.example.com', 'user-id', 'scott', 'token-123'), 'token-123')
+  ct.same(nativeProvider.set.firstCall.args, ['DOTENVX_ARMOR_TOKEN', 'token-123'])
+  ct.equal(sesh.token(), 'token-123')
+  ct.same(nativeProvider.get.firstCall.args, ['DOTENVX_ARMOR_TOKEN'])
+  ct.notMatch(fs.readFileSync(path.join(process.env.DOTENVX_CONFIG, '.env'), 'utf8'), /DOTENVX_ARMOR_TOKEN/)
+  ct.end()
+})
+
+t.test('Session validates login settings before saving', ct => {
+  const Session = require('../../src/db/session')
+  const sesh = new Session()
+
+  ct.throws(() => sesh.login(), /DOTENVX_ARMOR_HOSTNAME/)
+  ct.throws(() => sesh.login('https://armor.example.com'), /DOTENVX_ARMOR_USER/)
+  ct.throws(() => sesh.login('https://armor.example.com', 'user-id'), /DOTENVX_ARMOR_USERNAME/)
+  ct.throws(() => sesh.login('https://armor.example.com', 'user-id', 'scott'), /DOTENVX_ARMOR_TOKEN/)
+  ct.end()
+})
+
+t.test('Session noArmor is false when native login is on', async ct => {
+  const Session = require('../../src/db/session')
+  const sesh = new Session()
+
+  sesh.login('https://armor.example.com', 'user-id', 'scott', 'token-123')
+
+  ct.equal(sesh.noArmorSync(), false)
+  ct.equal(await sesh.noArmor(), false)
+})
+
+t.test('Session noArmor is true when DOTENVX_NO_ARMOR is true', async ct => {
+  process.env.DOTENVX_NO_ARMOR = 'true'
+  const Session = require('../../src/db/session')
+  const sesh = new Session()
+
+  sesh.login('https://armor.example.com', 'user-id', 'scott', 'token-123')
+
+  ct.equal(sesh.noArmorSync(), true)
+  ct.equal(await sesh.noArmor(), true)
+})
+
+t.test('Session logout clears login settings when config exists', ct => {
+  const Session = require('../../src/db/session')
+  const sesh = new Session()
+
+  sesh.login('https://armor.example.com', 'user-id', 'scott', 'token-123')
+  ct.equal(sesh.status(), 'on')
+  nativeProvider.delete.resetBehavior()
+  ct.equal(sesh.logout('https://armor.example.com', 'user-id', 'token-123'), true)
+  ct.same(nativeProvider.delete.firstCall.args, ['DOTENVX_ARMOR_TOKEN'])
+  ct.equal(sesh.username(), undefined)
+  ct.equal(sesh.token(), undefined)
+  ct.equal(sesh.hostname(), 'https://armor.dotenvx.com')
+  ct.equal(sesh.status(), 'off')
+  ct.end()
+})
+
+t.test('Session validates logout settings before clearing', ct => {
+  const Session = require('../../src/db/session')
+  const sesh = new Session()
+
+  ct.throws(() => sesh.logout(), /DOTENVX_ARMOR_HOSTNAME/)
+  ct.throws(() => sesh.logout('https://armor.example.com'), /DOTENVX_ARMOR_USER/)
+  ct.throws(() => sesh.logout('https://armor.example.com', 'user-id'), /DOTENVX_ARMOR_TOKEN/)
+  ct.end()
+})
+
+t.test('Session logout does not create config when config is absent', ct => {
+  const configPath = path.join(process.env.DOTENVX_CONFIG, '.env')
+  class FakeConf {
+    constructor () {
+      throw new Error('Conf should not be constructed')
+    }
+  }
+
+  const Session = proxyquire('../../src/db/session', {
+    '@dotenvx/tooling': { ...tooling, Conf: FakeConf }
+  })
+  const sesh = new Session()
+
+  ct.equal(sesh.logout('https://armor.example.com', 'user-id', 'token-123'), true)
+  ct.notOk(fs.existsSync(configPath), 'config file is not created')
+  ct.end()
+})
+
+t.test('Session does not open config for status helpers when config is absent', async ct => {
+  const configPath = path.join(process.env.DOTENVX_CONFIG, '.env')
+  class FakeConf {
+    constructor () {
+      throw new Error('Conf should not be constructed')
+    }
+  }
+
+  const Session = proxyquire('../../src/db/session', {
+    '@dotenvx/tooling': { ...tooling, Conf: FakeConf }
+  })
+  const sesh = new Session()
+
+  ct.equal(sesh.status(), 'off')
+  ct.equal(sesh.hostname(), 'https://armor.dotenvx.com')
+  ct.equal(sesh.username(), undefined)
+  ct.equal(sesh.token(), undefined)
+  ct.equal(sesh.store, null)
+  ct.equal(sesh.path(), configPath)
+  ct.equal(sesh.noArmorSync(), true)
+  ct.equal(await sesh.noArmor(), true)
+  ct.notOk(fs.existsSync(configPath), 'config file is not created')
+})
+
+t.test('Session notifyUpdate does not create config when config is absent', async ct => {
+  const configPath = path.join(process.env.DOTENVX_CONFIG, '.env')
+  class FakeConf {
+    constructor () {
+      throw new Error('Conf should not be constructed')
+    }
+  }
+
+  const Session = proxyquire('../../src/db/session', {
+    '@dotenvx/tooling': { ...tooling, Conf: FakeConf }
+  })
+  const sesh = new Session()
+
+  await sesh.notifyUpdate()
+
+  ct.notOk(fs.existsSync(configPath), 'config file is not created')
+})
+
+t.test('Session notifyUpdate checks dotenvx VERSION endpoint and stores dotenvx keys', async ct => {
+  fs.writeFileSync(path.join(process.env.DOTENVX_CONFIG, '.env'), 'DOTENVX_ARMOR_TOKEN="token-123"\n', 'utf8')
+  sinon.stub(Date, 'now').returns(1710000000000)
+  const consoleErrorStub = sinon.stub(console, 'error')
+  const values = {}
+  const httpStub = sinon.stub().resolves({
+    body: {
+      text: async () => '9.9.9\n'
+    }
+  })
+
+  class FakeConf {
+    constructor () {
+      this.path = path.join(process.env.DOTENVX_CONFIG, '.env')
+    }
+
+    get (key) {
+      return values[key]
+    }
+
+    set (key, value) {
+      values[key] = value
+    }
+  }
+
+  const Session = proxyquire('../../src/db/session', {
+    '@dotenvx/tooling': { ...tooling, Conf: FakeConf },
+    './../lib/helpers/http': { http: httpStub },
+    './../lib/helpers/packageJson': { version: '1.0.0' }
+  })
+  const sesh = new Session()
+
+  await sesh.notifyUpdate()
+
+  ct.same(httpStub.firstCall.args, ['https://dotenvx.sh/VERSION'])
+  ct.equal(values.DOTENVX_VERSION, '9.9.9')
+  ct.equal(values.DOTENVX_VERSION_LAST_CHECK, 1710000000000)
+  ct.ok(consoleErrorStub.calledWith('⛆ update available [curl -sfS https://dotenvx.sh | sh]'))
+})
+
+t.test('Session notifyUpdate skips check when dotenvx version was checked recently', async ct => {
+  fs.writeFileSync(path.join(process.env.DOTENVX_CONFIG, '.env'), 'DOTENVX_VERSION_LAST_CHECK="1709999999999"\n', 'utf8')
+  sinon.stub(Date, 'now').returns(1710000000000)
+  const values = {
+    DOTENVX_VERSION_LAST_CHECK: 1709999999999
+  }
+  const httpStub = sinon.stub()
+
+  class FakeConf {
+    constructor () {
+      this.path = path.join(process.env.DOTENVX_CONFIG, '.env')
+    }
+
+    get (key) {
+      return values[key]
+    }
+
+    set (key, value) {
+      values[key] = value
+    }
+  }
+
+  const Session = proxyquire('../../src/db/session', {
+    '@dotenvx/tooling': { ...tooling, Conf: FakeConf },
+    './../lib/helpers/http': { http: httpStub },
+    './../lib/helpers/packageJson': { version: '1.0.0' }
+  })
+  const sesh = new Session()
+
+  await sesh.notifyUpdate()
+
+  ct.equal(httpStub.callCount, 0)
+})
+
+t.test('Session supports default config path when DOTENVX_CONFIG is unset', ct => {
+  delete process.env.DOTENVX_CONFIG
+  const defaultConfig = fs.mkdtempSync(path.join(os.tmpdir(), 'dotenvx-default-session-'))
+  const Session = proxyquire('../../src/db/session', {
+    '@dotenvx/tooling': { ...tooling, envPaths: () => ({ config: defaultConfig }) }
+  })
+  const sesh = new Session()
+
+  ct.equal(sesh.path(), path.join(defaultConfig, '.env'))
+  ct.equal(sesh.hostname(), 'https://armor.dotenvx.com')
+  ct.notOk(fs.existsSync(path.join(defaultConfig, '.env')), 'default config file is not created')
+  ct.end()
+})
+
+t.test('Session creates default store on login when DOTENVX_CONFIG is unset', ct => {
+  delete process.env.DOTENVX_CONFIG
+  const defaultConfig = fs.mkdtempSync(path.join(os.tmpdir(), 'dotenvx-default-session-'))
+  let confOptions
+  class FakeConf {
+    constructor (options) {
+      confOptions = options
+      this.path = 'default-path'
+      this.values = {}
+    }
+
+    get (key) {
+      return this.values[key]
+    }
+
+    set (key, value) {
+      this.values[key] = value
+    }
+  }
+
+  const Session = proxyquire('../../src/db/session', {
+    '@dotenvx/tooling': { ...tooling, Conf: FakeConf, envPaths: () => ({ config: defaultConfig }) }
+  })
+  const sesh = new Session()
+
+  ct.equal(sesh.login('https://armor.example.com', 'user-id', 'scott', 'token-123'), 'token-123')
+  ct.equal(confOptions.cwd, undefined)
+  ct.equal(sesh.path(), 'default-path')
+  ct.end()
+})
+
+t.test('Session reads existing config without login', ct => {
+  const configPath = path.join(process.env.DOTENVX_CONFIG, '.env')
+  fs.writeFileSync(configPath, 'DOTENVX_ARMOR_HOSTNAME="https://armor.example.com"\nDOTENVX_ARMOR_USERNAME="scott"\nDOTENVX_ARMOR_TOKEN="token-123"\n', 'utf8')
+
+  const Session = require('../../src/db/session')
+  const sesh = new Session()
+
+  ct.equal(sesh.hostname(), 'https://armor.example.com')
+  ct.equal(sesh.username(), 'scott')
+  ct.equal(sesh.token(), 'token-123')
+  ct.equal(sesh.status(), 'on')
+  ct.end()
+})
+
+t.test('Session returns device public key and system information', async ct => {
+  const Session = require('../../src/db/session')
+  const sesh = new Session()
+
+  ct.match(sesh.devicePublicKey(), /^[0-9a-f]+$/)
+  const info = await sesh.systemInformation()
+  ct.type(info.system_uuid, 'string')
+  ct.type(info.os_platform, 'string')
+  ct.type(info.os_arch, 'string')
+})
+
+t.test('Device reuses existing private key', ct => {
+  const Device = require('../../src/db/device')
+  const device = new Device()
+
+  const firstPrivateKey = device.privateKey()
+  const secondPrivateKey = device.privateKey()
+
+  ct.equal(secondPrivateKey, firstPrivateKey)
+  ct.same(device.touch(), {
+    privateKey: firstPrivateKey,
+    publicKey: device.publicKey()
+  })
+  const encrypted = device.encrypt('hello')
+  ct.equal(device.decrypt(encrypted), 'hello')
+  ct.type(device.configPath(), 'string')
+  ct.end()
+})
+
+t.test('Device supports default config path and empty private key branch', ct => {
+  delete process.env.DOTENVX_CONFIG
+  const defaultConfig = fs.mkdtempSync(path.join(os.tmpdir(), 'dotenvx-default-device-'))
+  let confOptions
+  class FakeConf {
+    constructor (options) {
+      confOptions = options
+    }
+
+    get () {
+      return null
+    }
+
+    set () {}
+  }
+
+  const Device = proxyquire('../../src/db/device', {
+    '@dotenvx/tooling': { ...tooling, Conf: FakeConf, envPaths: () => ({ config: defaultConfig }) }
+  })
+  const device = new Device()
+
+  ct.equal(confOptions.cwd, undefined)
+  device.privateKey = () => ''
+  ct.equal(device.publicKey(), '')
+  ct.end()
+})

@@ -1,0 +1,136 @@
+const t = require('tap')
+const fsx = require('../../../src/lib/helpers/fsx')
+const path = require('path')
+const sinon = require('sinon')
+
+const Genexample = require('../../../src/lib/services/genexample')
+
+t.test('#run', ct => {
+  const genexample = new Genexample('tests/monorepo/apps/frontend')
+
+  const {
+    envExampleFile,
+    injected,
+    existed
+  } = genexample.run()
+
+  const output = `# .env.example - generated with dotenvx
+
+# for testing purposes only
+HELLO="" # this is a comment
+`
+  ct.same(envExampleFile, output)
+  ct.same(injected, { HELLO: '' })
+  ct.same(existed, {})
+
+  ct.end()
+})
+
+t.test('#run (.env.example already exists)', ct => {
+  const genexample = new Genexample('tests/monorepo/apps/backend')
+
+  const {
+    envExampleFile,
+    injected,
+    existed
+  } = genexample.run()
+
+  const output = `# .env.example - generated with dotenvx
+HELLO=''
+`
+  ct.same(envExampleFile, output)
+  ct.same(injected, {})
+  ct.same(existed, { HELLO: '' })
+
+  ct.end()
+})
+
+t.test('#run (.env.example already exists but with different keys)', ct => {
+  const originalReadFileSync = fsx.readFileXSync
+  const sandbox = sinon.createSandbox()
+  sandbox.stub(fsx, 'readFileXSync').callsFake((filepath, options) => {
+    if (filepath === path.resolve('tests/monorepo/apps/backend/.env')) {
+      return 'HELLO=world\nHELLO2=universe'
+    } else {
+      return originalReadFileSync(filepath, options)
+    }
+  })
+
+  const genexample = new Genexample('tests/monorepo/apps/backend')
+
+  const {
+    envExampleFile,
+    injected,
+    existed
+  } = genexample.run()
+
+  const output = `# .env.example - generated with dotenvx
+HELLO=''
+HELLO2=''
+`
+
+  ct.same(envExampleFile, output)
+  ct.same(injected, { HELLO2: '' })
+  ct.same(existed, { HELLO: '' })
+
+  ct.end()
+})
+
+t.test('#run (string envFile)', ct => {
+  const genexample = new Genexample('tests/monorepo/apps/frontend', '.env')
+
+  const {
+    envExampleFile,
+    injected,
+    existed
+  } = genexample.run()
+
+  const output = `# .env.example - generated with dotenvx
+
+# for testing purposes only
+HELLO="" # this is a comment
+`
+  ct.same(envExampleFile, output)
+  ct.same(injected, { HELLO: '' })
+  ct.same(existed, {})
+
+  ct.end()
+})
+
+t.test('#run (cant find directory)', ct => {
+  try {
+    new Genexample('tests/monorepo/apps/frontendzzzz').run()
+
+    ct.fail('should have raised an error but did not')
+  } catch (error) {
+    ct.equal(error.message, '[MISSING_DIRECTORY] missing directory (tests/monorepo/apps/frontendzzzz)')
+  }
+
+  ct.end()
+})
+
+t.test('#run (missing env files)', ct => {
+  try {
+    new Genexample('tests/monorepo/apps/frontend', []).run()
+    ct.fail('should have raised an error but did not')
+  } catch (error) {
+    ct.equal(error.code, 'MISSING_ENV_FILES')
+    ct.equal(error.message, '[MISSING_ENV_FILES] no .env* files found')
+    ct.equal(error.help, 'fix: [https://github.com/dotenvx/dotenvx/issues/760]')
+  }
+
+  ct.end()
+})
+
+t.test('#run (non-existent .env file)', ct => {
+  try {
+    new Genexample('tests/monorepo/apps/frontend', ['.env.nonexistent']).run()
+    ct.fail('should have raised an error but did not')
+  } catch (error) {
+    ct.equal(error.code, 'MISSING_ENV_FILE')
+    ct.equal(error.message, '[MISSING_ENV_FILE] missing file (.env.nonexistent)')
+    ct.equal(error.help, '? add it with [echo "HELLO=World" > .env.nonexistent] and then run [dotenvx genexample]')
+  }
+
+  ct.end()
+})
